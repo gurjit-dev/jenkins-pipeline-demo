@@ -53,7 +53,7 @@ pipeline {
                   passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
           sh '''
             set -e
-            source .ecr.env
+            . .ecr.env
             IMAGE_TAG="${GIT_COMMIT}"
             docker build -t "$ECR_URI:$IMAGE_TAG" .
             docker push "$ECR_URI:$IMAGE_TAG"
