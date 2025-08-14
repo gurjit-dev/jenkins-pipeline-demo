@@ -69,6 +69,34 @@ pipeline {
       }
     }
 
+    stage('Allow Jenkins -> EKS API') {
+  steps {
+    withCredentials([usernamePassword(credentialsId: 'aws-creds',
+      usernameVariable: 'AWS_ACCESS_KEY_ID',
+      passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
+      sh '''
+        set -e
+        REGION="$AWS_DEFAULT_REGION"
+        CLUSTER="$CLUSTER_NAME"
+
+        INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
+        CLUSTER_SG=$(aws eks describe-cluster --name "$CLUSTER" --region "$REGION" \
+          --query "cluster.resourcesVpcConfig.clusterSecurityGroupId" --output text)
+        JENKINS_SG=$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" --region "$REGION" \
+          --query "Reservations[0].Instances[0].SecurityGroups[0].GroupId" --output text)
+
+        echo "Cluster SG:  $CLUSTER_SG"
+        echo "Jenkins  SG: $JENKINS_SG"
+
+        # Allow HTTPS from Jenkins SG to the EKS control plane
+        aws ec2 authorize-security-group-ingress \
+          --group-id "$CLUSTER_SG" --protocol tcp --port 443 --source-group "$JENKINS_SG" \
+          --region "$REGION" || true
+      '''
+    }
+  }
+}
+
     stage('Kubeconfig') {
       steps {
         withCredentials([usernamePassword(credentialsId: 'aws-creds',
