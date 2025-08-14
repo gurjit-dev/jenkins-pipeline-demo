@@ -75,23 +75,42 @@ pipeline {
       usernameVariable: 'AWS_ACCESS_KEY_ID',
       passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
       sh '''
-        set -e
-        REGION="$AWS_DEFAULT_REGION"
-        CLUSTER="$CLUSTER_NAME"
+        set -euo pipefail
+        REGION="${AWS_DEFAULT_REGION}"
+        CLUSTER="${CLUSTER_NAME}"
 
-        INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
+        # --- IMDSv2: fetch instance-id safely ---
+        TOKEN=$(curl -fsSL -X PUT "http://169.254.169.254/latest/api/token" \
+                  -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+        INSTANCE_ID=$(curl -fsSL -H "X-aws-ec2-metadata-token: $TOKEN" \
+                  http://169.254.169.254/latest/meta-data/instance-id || true)
+
+        # Fallback: resolve by private IP (in case IMDS is restricted)
+        if [ -z "${INSTANCE_ID:-}" ] || ! echo "$INSTANCE_ID" | grep -q '^i-'; then
+          IP=$(hostname -I | awk '{print $1}')
+          INSTANCE_ID=$(aws ec2 describe-instances \
+            --filters "Name=private-ip-address,Values=$IP" \
+            --region "$REGION" \
+            --query 'Reservations[0].Instances[0].InstanceId' \
+            --output text)
+        fi
+        echo "INSTANCE_ID=$INSTANCE_ID"
+
+        # Get the EKS control-plane SG and all SGs on this instance
         CLUSTER_SG=$(aws eks describe-cluster --name "$CLUSTER" --region "$REGION" \
-          --query "cluster.resourcesVpcConfig.clusterSecurityGroupId" --output text)
-        JENKINS_SG=$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" --region "$REGION" \
-          --query "Reservations[0].Instances[0].SecurityGroups[0].GroupId" --output text)
+                      --query 'cluster.resourcesVpcConfig.clusterSecurityGroupId' --output text)
+        JENKINS_SGS=$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" --region "$REGION" \
+                      --query 'Reservations[0].Instances[0].SecurityGroups[].GroupId' --output text)
 
         echo "Cluster SG:  $CLUSTER_SG"
-        echo "Jenkins  SG: $JENKINS_SG"
+        echo "Jenkins SGs: $JENKINS_SGS"
 
-        # Allow HTTPS from Jenkins SG to the EKS control plane
-        aws ec2 authorize-security-group-ingress \
-          --group-id "$CLUSTER_SG" --protocol tcp --port 443 --source-group "$JENKINS_SG" \
-          --region "$REGION" || true
+        # Allow HTTPS from each Jenkins SG to the EKS control plane (idempotent)
+        for SG in $JENKINS_SGS; do
+          aws ec2 authorize-security-group-ingress \
+            --group-id "$CLUSTER_SG" --protocol tcp --port 443 \
+            --source-group "$SG" --region "$REGION" || true
+        done
       '''
     }
   }
