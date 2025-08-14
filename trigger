@@ -1,2 +1,2 @@
-Third demo trigger.
+New demo trigger.
 
